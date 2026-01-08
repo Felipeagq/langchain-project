@@ -82,6 +82,5 @@ def router_con_memoria(mensaje: str, memory):
         decision = response.content.strip().lower()
         return decision
     except Exception as e:
-        print(f"⚠️ Error en router_con_memoria: {str(e)}")
         # Fallback al router sin memoria
         return router_chain.invoke({"mensaje": mensaje})["text"].strip().lower()
