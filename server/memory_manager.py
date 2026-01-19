@@ -68,8 +68,15 @@ class PersistentMemoryManager:
             return_messages=True
         )
 
-        # Cargar mensajes históricos
-        mensajes = PersistentMemoryManager.get_history(session_id)
+        # Cargar mensajes históricos directamente desde la BD
+        db = SessionLocal()
+        try:
+            mensajes = db.query(Mensaje)\
+                .filter(Mensaje.session_id == session_id)\
+                .order_by(Mensaje.timestamp)\
+                .all()
+        finally:
+            db.close()
 
         # Convertir a formato LangChain
         for msg in mensajes:

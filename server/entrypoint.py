@@ -53,12 +53,6 @@ async def root():
     return {
         "message": "API Multi-Agente con Memoria Persistente",
         "version": "1.0.0",
-        "endpoints": {
-            "POST /chat": "Enviar mensaje (Header: session-id opcional)",
-            "GET /history/{session_id}": "Ver historial de una sesión",
-            "DELETE /history/{session_id}": "Borrar historial de una sesión"
-        },
-        "documentation": "/docs"
     }
 
 
@@ -240,6 +234,4 @@ if __name__ == "__main__":
         host="localhost",
         port=5050,
         reload=True,
-        log_level="info",
-        use_colors=True
     )
