@@ -1,8 +1,14 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+from twilio.rest import Client
+from dotenv import load_dotenv
 import uuid
+import os
+
+load_dotenv()
 
 from database import engine, Base
 from agente_crear import crear_agente_con_memoria as crear_agente_crear
@@ -28,6 +34,12 @@ app.add_middleware(
 
 # Crear tablas en la base de datos
 Base.metadata.create_all(bind=engine)
+
+# Configuración de Twilio
+account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+twilio_number = os.getenv("TWILIO_PHONE_NUMBER", "whatsapp:+12697484776")
+twilio_client = Client(account_sid, auth_token)
 
 
 # Modelos Pydantic para request/response
@@ -215,6 +227,123 @@ async def clear_history(session_id: str):
     }
 
 
+@app.post("/whatsapp")
+async def recibir_mensaje_whatsapp(From: str = Form(...), Body: str = Form(...)):
+    """
+    Endpoint para recibir mensajes de WhatsApp via Twilio.
+    Usa el sistema multi-agente para generar respuestas inteligentes.
+    """
+    mensaje = Body.strip()
+    # Usar el número de teléfono como session_id para mantener contexto por usuario
+    session_id = From.replace("whatsapp:", "").replace("+", "")
+
+    print(f"[WhatsApp] {From}: {mensaje}")
+    print(f"[DEBUG] session_id generado: {session_id}")
+
+    # 1. Cargar memoria del usuario
+    print(f"[DEBUG] Cargando memoria para session_id: {session_id}")
+    memory = PersistentMemoryManager.load_memory_for_agent(session_id)
+    print(f"[DEBUG] Memoria cargada - mensajes en historial: {len(memory.chat_memory.messages)}")
+
+    # 2. Guardar mensaje del usuario
+    print(f"[DEBUG] Guardando mensaje del usuario en BD...")
+    PersistentMemoryManager.save_message(
+        session_id=session_id,
+        role="user",
+        content=mensaje
+    )
+    print(f"[DEBUG] Mensaje guardado en BD")
+
+    # 3. Decidir qué agente usar
+    print(f"[DEBUG] Llamando a router_con_memoria con mensaje: '{mensaje}'")
+    try:
+        decision = router_con_memoria(mensaje, memory)
+        print(f"[DEBUG] router_con_memoria retornó decisión: '{decision}'")
+    except Exception as e:
+        print(f"[DEBUG] ERROR en router_con_memoria: {str(e)}")
+        decision = "error"
+        respuesta = f"Error al procesar: {str(e)}"
+
+    # 4. Agregar mensaje a memoria
+    print(f"[DEBUG] Agregando mensaje a memoria del agente")
+    memory.chat_memory.add_user_message(mensaje)
+
+    # 5. Procesar con el agente correspondiente
+    print(f"[DEBUG] Entrando a procesar con decisión: '{decision}'")
+    if decision == "crear":
+        print(f"[DEBUG] >>> ENTRANDO A RAMA 'crear'")
+        contexto_resumido = []
+        for msg in memory.chat_memory.messages[:-1]:
+            if msg.type == "human":
+                contexto_resumido.append(f"Usuario dijo: {msg.content}")
+            else:
+                contexto_resumido.append(f"Asistente respondió: {msg.content}")
+
+        if contexto_resumido:
+            mensaje_con_contexto = f"""Contexto de la conversación anterior:
+{chr(10).join(contexto_resumido)}
+Mensaje actual del usuario: {mensaje}
+IMPORTANTE: Revisa el contexto anterior para extraer nombre y email si ya fueron mencionados."""
+        else:
+            mensaje_con_contexto = mensaje
+
+        try:
+            agente = crear_agente_crear(memory)
+            resultado = agente.invoke({"input": mensaje_con_contexto})
+            respuesta = resultado.get("output", str(resultado))
+        except Exception as e:
+            respuesta = f"Error en agente crear: {str(e)}"
+
+    elif decision == "consultar":
+        print(f"[DEBUG] >>> ENTRANDO A RAMA 'consultar'")
+        contexto_resumido = []
+        for msg in memory.chat_memory.messages[:-1]:
+            if msg.type == "human":
+                contexto_resumido.append(f"Usuario dijo: {msg.content}")
+            else:
+                contexto_resumido.append(f"Asistente respondió: {msg.content}")
+
+        if contexto_resumido:
+            mensaje_con_contexto = f"""Contexto de la conversación anterior:
+{chr(10).join(contexto_resumido)}
+Mensaje actual del usuario: {mensaje}
+IMPORTANTE: Revisa el contexto anterior para entender qué información busca el usuario."""
+        else:
+            mensaje_con_contexto = mensaje
+
+        try:
+            agente = crear_agente_consultar(memory)
+            resultado = agente.invoke({"input": mensaje_con_contexto})
+            respuesta = resultado.get("output", str(resultado))
+        except Exception as e:
+            respuesta = f"Error en agente consultar: {str(e)}"
+
+    else:
+        print(f"[DEBUG] >>> ENTRANDO A RAMA 'else' - decisión no reconocida: '{decision}'")
+        respuesta = "No entendí la solicitud. Por favor, reformula tu mensaje."
+
+    # 6. Guardar respuesta en BD
+    print(f"[DEBUG] Respuesta generada: {respuesta[:100]}...")
+    print(f"[DEBUG] Guardando respuesta en BD...")
+    PersistentMemoryManager.save_message(
+        session_id=session_id,
+        role="assistant",
+        content=respuesta
+    )
+
+    # 7. Enviar respuesta via Twilio
+    try:
+        twilio_client.messages.create(
+            from_=twilio_number,
+            to=From,
+            body=respuesta
+        )
+    except Exception as e:
+        print(f"[WhatsApp] Error enviando mensaje: {e}")
+
+    return JSONResponse(content={"status": "enviado", "session_id": session_id})
+
+
 @app.get("/health")
 async def health_check():
     """
@@ -231,7 +360,7 @@ if __name__ == "__main__":
     import uvicorn 
     uvicorn.run(
         "entrypoint:app",
-        host="localhost",
-        port=5050,
+        host="0.0.0.0",
+        port=8004,
         reload=True,
     )
